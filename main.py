@@ -128,9 +128,11 @@ class RapidoOchoaAPI:
         """Consulta directa usando HTTP"""
         
         try:
-            if not self.view_state:
-                if not self._obtener_view_state():
-                    raise HTTPException(status_code=500, detail="No se pudo inicializar sesión")
+            # IMPORTANTE: Obtener ViewState FRESCO para cada consulta
+            # Esto evita que expire después de 5 minutos
+            logger.info(f"🔄 Obteniendo ViewState fresco para esta consulta...")
+            if not self._obtener_view_state():
+                raise HTTPException(status_code=500, detail="No se pudo inicializar sesión")
             
             logger.info(f"🔍 Consultando guía: {numero_guia}")
             
