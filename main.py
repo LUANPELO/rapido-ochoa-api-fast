@@ -13,6 +13,7 @@ import re
 from datetime import datetime
 import logging
 from bs4 import BeautifulSoup
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -75,7 +76,6 @@ class RapidoOchoaAPI:
         })
         self.view_state = None
         # Modo debug desactivado en producción
-        import os
         self.debug_mode = os.environ.get("DEBUG", "False").lower() == "true"
     
     def _obtener_view_state(self):
@@ -177,7 +177,6 @@ class RapidoOchoaAPI:
     def _parsear_respuesta(self, xml_response: str, numero_guia: str) -> DatosEncomienda:
         """Parsea la respuesta XML del servidor"""
         
-        # Crear objeto con fecha_consulta
         datos = DatosEncomienda(
             numero_guia=numero_guia,
             fecha_consulta=datetime.now().isoformat()
@@ -220,7 +219,7 @@ class RapidoOchoaAPI:
                         logger.info(f"✅ Fecha admisión: {datos.fecha_admision}")
                         break
             
-            # Extraer Origen y Destino desde "Origen - Destino"
+            # Extraer Origen y Destino
             for label in all_labels:
                 text = label.get_text(strip=True)
                 if ' - ' in text and '(' in text and ')' in text:
@@ -255,7 +254,7 @@ class RapidoOchoaAPI:
                                 datos.destinatario_nombre = match.group(1).strip()
                                 logger.info(f"✅ Destinatario: {datos.destinatario_nombre}")
             
-            # Extraer Productos y Total Unidades - identificar tabla correcta
+            # Extraer Productos y Total Unidades
             all_tables = soup.find_all('table')
             productos_procesados = False
             
@@ -263,21 +262,15 @@ class RapidoOchoaAPI:
                 rows = table.find_all('tr')
                 
                 if len(rows) > 0:
-                    # Identificar headers
                     header_cells = rows[0].find_all(['th', 'td'])
                     headers = [cell.get_text(strip=True).lower() for cell in header_cells]
                     logger.info(f"🐛 Tabla encontrada con headers: {headers}")
                     
-                    # Verificar si es la tabla de PRODUCTOS (tiene "empaque" o "dice contener")
                     es_tabla_productos = any(h in ['empaque', 'dice contener', 'unidades', 'peso cobrar'] for h in headers)
                     
-                    # Verificar si es tabla de TRAZABILIDAD (tiene "fecha" y "detalle")
-                    es_tabla_trazabilidad = 'fecha' in headers and 'detalle' in headers
-                    
-                    if es_tabla_productos and not es_tabla_trazabilidad and not productos_procesados:
+                    if es_tabla_productos and not productos_procesados:
                         logger.info("✅ Tabla de PRODUCTOS identificada")
                         
-                        # Mapear índices de columnas
                         col_map = {}
                         for idx, header in enumerate(headers):
                             if 'empaque' in header:
@@ -289,34 +282,57 @@ class RapidoOchoaAPI:
                             elif 'peso' in header and 'cobrar' in header:
                                 col_map['peso_cobrar'] = idx
                         
-                        # Procesar filas de productos
                         for row in rows[1:]:
                             cells = row.find_all(['td', 'th'])
                             if len(cells) >= 2:
                                 first_cell = cells[0].get_text(strip=True)
                                 
-                                # Fila TOTAL - buscar el primer número después de "Total"
                                 if first_cell.lower() == 'total':
-                                    cell_values = [c.get_text(strip=True) for c in cells]
+                                    cell_values = []
+                                    for cell in cells:
+                                        label = cell.find('label')
+                                        if label:
+                                            cell_values.append(label.get_text(strip=True))
+                                        else:
+                                            cell_values.append(cell.get_text(strip=True))
+                                    
                                     logger.info(f"🐛 Fila Total encontrada: {cell_values}")
                                     
-                                    # Buscar el primer número que sea pequeño (< 100)
-                                    for i, val in enumerate(cell_values[1:], 1):  # Empezar desde índice 1
-                                        if val.isdigit():
+                                    for i, val in enumerate(cell_values[1:], 1):
+                                        if val and val.isdigit():
                                             num = int(val)
-                                            if num < 100:  # Asumimos que unidades < 100
+                                            if num < 100:
                                                 datos.total_unidades = val
                                                 logger.info(f"✅ Total unidades: {datos.total_unidades}")
                                                 break
                                 
-                                # Fila de producto (no es "Total")
                                 elif first_cell and first_cell.lower() != 'total':
                                     try:
+                                        empaque_cell = cells[col_map.get('empaque', 0)]
+                                        empaque_label = empaque_cell.find('label')
+                                        empaque = empaque_label.get_text(strip=True) if empaque_label else empaque_cell.get_text(strip=True)
+                                        
+                                        dice_cell = cells[col_map.get('dice_contener', 1)]
+                                        dice_label = dice_cell.find('label')
+                                        dice_contener = dice_label.get_text(strip=True) if dice_label else dice_cell.get_text(strip=True)
+                                        
+                                        unidades_cell = cells[col_map.get('unidades', 2)]
+                                        unidades_label = unidades_cell.find('label')
+                                        unidades = unidades_label.get_text(strip=True) if unidades_label else unidades_cell.get_text(strip=True)
+                                        
+                                        peso_idx = col_map.get('peso_cobrar', 3)
+                                        if len(cells) > peso_idx:
+                                            peso_cell = cells[peso_idx]
+                                            peso_label = peso_cell.find('label')
+                                            peso_cobrar = peso_label.get_text(strip=True) if peso_label else peso_cell.get_text(strip=True)
+                                        else:
+                                            peso_cobrar = ""
+                                        
                                         producto = Producto(
-                                            empaque=cells[col_map.get('empaque', 0)].get_text(strip=True),
-                                            dice_contener=cells[col_map.get('dice_contener', 1)].get_text(strip=True),
-                                            unidades=cells[col_map.get('unidades', 2)].get_text(strip=True),
-                                            peso_cobrar=cells[col_map.get('peso_cobrar', 3)].get_text(strip=True) if len(cells) > 3 else ""
+                                            empaque=empaque,
+                                            dice_contener=dice_contener,
+                                            unidades=unidades,
+                                            peso_cobrar=peso_cobrar
                                         )
                                         datos.productos.append(producto)
                                         logger.info(f"✅ Producto agregado: {producto.empaque}")
@@ -325,7 +341,7 @@ class RapidoOchoaAPI:
                         
                         productos_procesados = True
             
-            # Extraer Trazabilidad - buscar en TODAS las tablas
+            # Extraer Trazabilidad
             trazabilidad_encontrada = False
             
             for table in all_tables:
@@ -335,72 +351,67 @@ class RapidoOchoaAPI:
                 rows = table.find_all('tr')
                 
                 if len(rows) > 1:
-                    # Verificar si es tabla de trazabilidad por el contenido
-                    # La primera fila de datos debería tener una fecha en formato YYYY/MM/DD
-                    primera_fila_data = rows[1] if len(rows) > 1 else None
+                    header_cells = rows[0].find_all(['th', 'td'])
+                    headers = [cell.get_text(strip=True).lower() for cell in header_cells]
                     
-                    if primera_fila_data:
-                        cells = primera_fila_data.find_all(['td', 'th'])
-                        if len(cells) >= 3:
-                            # Obtener texto de primera celda
-                            primera_celda = cells[0].find('label')
-                            if primera_celda:
-                                primer_texto = primera_celda.get_text(strip=True)
-                            else:
-                                primer_texto = cells[0].get_text(strip=True)
+                    es_tabla_trazabilidad = 'fecha' in headers and 'detalle' in headers
+                    
+                    if es_tabla_trazabilidad:
+                        logger.info(f"✅ Tabla de TRAZABILIDAD identificada por headers")
+                        logger.info(f"🐛 Headers: {headers}")
+                        logger.info(f"🐛 Total de filas a procesar: {len(rows) - 1}")
+                        
+                        eventos_agregados = 0
+                        for idx, row in enumerate(rows[1:], 1):
+                            cells = row.find_all(['td', 'th'])
                             
-                            # Si la primera celda tiene formato de fecha, es tabla de trazabilidad
-                            if re.search(r'\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}', primer_texto):
-                                logger.info(f"✅ Tabla de TRAZABILIDAD identificada por contenido")
-                                logger.info(f"🐛 Total de filas a procesar: {len(rows) - 1}")
+                            if len(cells) >= 3:
+                                valores = []
+                                for i in range(3):
+                                    if i < len(cells):
+                                        label = cells[i].find('label')
+                                        valor = label.get_text(strip=True) if label else cells[i].get_text(strip=True)
+                                        valores.append(valor)
+                                    else:
+                                        valores.append("")
                                 
-                                # Procesar TODAS las filas de datos (saltar header)
-                                for idx, row in enumerate(rows[1:], 1):
-                                    cells = row.find_all(['td', 'th'])
+                                fecha_text = valores[0] if len(valores) > 0 else ""
+                                detalle_text = valores[1] if len(valores) > 1 else ""
+                                sede_text = valores[2] if len(valores) > 2 else ""
+                                
+                                logger.info(f"🐛 Fila {idx}: F='{fecha_text[:20]}...' D='{detalle_text[:30]}...'")
+                                
+                                if fecha_text and detalle_text:
+                                    tiene_formato_fecha = bool(re.search(r'\d{4}[/-]\d{2}[/-]\d{2}', fecha_text))
                                     
-                                    if len(cells) >= 3:
-                                        # Extraer fecha (columna 0)
-                                        label = cells[0].find('label')
-                                        fecha_text = label.get_text(strip=True) if label else cells[0].get_text(strip=True)
-                                        
-                                        # Extraer detalle (columna 1)
-                                        label = cells[1].find('label')
-                                        detalle_text = label.get_text(strip=True) if label else cells[1].get_text(strip=True)
-                                        
-                                        # Extraer sede (columna 2)
-                                        label = cells[2].find('label')
-                                        sede_text = label.get_text(strip=True) if label else cells[2].get_text(strip=True)
-                                        
-                                        logger.info(f"🐛 Fila {idx}: Fecha='{fecha_text}', Detalle='{detalle_text}'")
-                                        
-                                        # Validar que tenga formato de fecha correcto
-                                        if re.search(r'\d{4}/\d{2}/\d{2}', fecha_text) and detalle_text:
-                                            evento = EventoTrazabilidad(
-                                                fecha=fecha_text,
-                                                detalle=detalle_text,
-                                                sede=sede_text,
-                                                estado=detalle_text
-                                            )
-                                            datos.trazabilidad.append(evento)
-                                            logger.info(f"✅ Evento {idx} agregado: {detalle_text}")
-                                        else:
-                                            logger.warning(f"⚠️ Fila {idx} descartada: formato inválido")
-                                
-                                trazabilidad_encontrada = True
-                                
-                                # El estado actual es el último evento
-                                if datos.trazabilidad:
-                                    datos.estado_actual = datos.trazabilidad[-1].estado
-                                    logger.info(f"✅ Estado actual: {datos.estado_actual}")
-                                
-                                logger.info(f"✅ Trazabilidad: {len(datos.trazabilidad)} eventos capturados")
+                                    if tiene_formato_fecha:
+                                        evento = EventoTrazabilidad(
+                                            fecha=fecha_text,
+                                            detalle=detalle_text,
+                                            sede=sede_text,
+                                            estado=detalle_text
+                                        )
+                                        datos.trazabilidad.append(evento)
+                                        eventos_agregados += 1
+                                        logger.info(f"✅ Evento {eventos_agregados} agregado: {detalle_text}")
+                                    else:
+                                        logger.info(f"⚠️ Fila {idx} sin formato de fecha válido")
+                                else:
+                                    logger.info(f"⚠️ Fila {idx} vacía o sin datos")
+                        
+                        if eventos_agregados > 0:
+                            trazabilidad_encontrada = True
+                            
+                            if datos.trazabilidad:
+                                datos.estado_actual = datos.trazabilidad[-1].estado
+                                logger.info(f"✅ Estado actual: {datos.estado_actual}")
+                            
+                            logger.info(f"✅ Trazabilidad: {len(datos.trazabilidad)} eventos capturados")
+                        else:
+                            logger.warning(f"⚠️ Tabla encontrada pero sin eventos válidos")
             
             if not trazabilidad_encontrada:
                 logger.warning("⚠️ No se encontró tabla de trazabilidad")
-            
-            # Validar datos mínimos
-            if not datos.fecha_admision and not datos.origen:
-                logger.warning("⚠️ Datos incompletos. Revisa debug_response.html")
             
             logger.info("✅ Datos extraídos exitosamente")
             return datos
@@ -452,7 +463,7 @@ def consultar_guia_post(consulta: ConsultaRequest):
     return api.consultar_guia(consulta.numero_guia)
 
 @app.get("/api/health")
-@app.head("/api/health")  # Aceptar HEAD requests de UptimeRobot
+@app.head("/api/health")
 def health_check():
     return {
         "status": "ok",
@@ -464,9 +475,5 @@ def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    import os
-    
-    # Usar PORT de Render o 8000 en local
     port = int(os.environ.get("PORT", 8000))
-    
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
