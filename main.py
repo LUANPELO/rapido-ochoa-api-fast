@@ -452,6 +452,7 @@ def consultar_guia_post(consulta: ConsultaRequest):
     return api.consultar_guia(consulta.numero_guia)
 
 @app.get("/api/health")
+@app.head("/api/health")  # Aceptar HEAD requests de UptimeRobot
 def health_check():
     return {
         "status": "ok",
