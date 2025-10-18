@@ -74,7 +74,9 @@ class RapidoOchoaAPI:
             'X-Requested-With': 'XMLHttpRequest',
         })
         self.view_state = None
-        self.debug_mode = True
+        # Modo debug desactivado en producción
+        import os
+        self.debug_mode = os.environ.get("DEBUG", "False").lower() == "true"
     
     def _obtener_view_state(self):
         """Obtiene el ViewState inicial de la página"""
